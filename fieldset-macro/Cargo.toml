@@ -1,0 +1,17 @@
+[package]
+name = "fieldset_macro"
+version = "0.1.0"
+edition = "2021"
+description = "fieldset macro crate"
+license = "MIT"
+repository = "https://github.com/liarokapisv/fieldset"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0.58", features = [ "full", "parsing" ] }
+quote = "1.0.36"
+convert_case = "0.6.0"
+heck = "0.5.0"
+proc-macro2 = "1.0.79"

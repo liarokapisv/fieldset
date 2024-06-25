@@ -1,0 +1,16 @@
+[package]
+name = "fieldset"
+version = "0.1.0"
+edition = "2021"
+description = "Struct to enum derivation"
+readme = "README.md"
+license-file = "LICENSE"
+repository = "https://github.com/liarokapisv/fieldset"
+keywords = ["fields", "events", "observer", "notification", "embedded"] 
+categories = ["asynchronous", "embedded", "no-std", "no-std::no-alloc", "rust-patterns"]
+
+[dependencies]
+fieldset_macro = "0.1.0"
+
+[dev-dependencies]
+version-sync = "0.9"
