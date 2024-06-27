@@ -53,7 +53,7 @@ fn derive_field_type(name: String, fields: FieldsNamed) -> TokenStream {
         res
     };
     quote!(
-        #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
         pub enum #derived_field_type_identifier {
             #(#enum_variants ,)*
         }
