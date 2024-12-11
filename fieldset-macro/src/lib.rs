@@ -347,7 +347,7 @@ fn common_trait_impl_methods(
             let type_identifier = get_type_identifier(field.ty);
             let start_expr = match index_expr.clone() {
                 Some(x) => quote!(#x),
-                None => quote!(),
+                None => quote!(0),
             };
             let variance_identifier = get_variance_identifier(type_identifier.clone());
             let end_expr = match index_expr.clone() {

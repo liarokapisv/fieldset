@@ -192,6 +192,12 @@ mod test {
         field_i: Inner,
     }
 
+    #[derive(Clone, Copy, FieldSet)]
+    struct TestFirstField {
+        #[fieldset]
+        field: Inner,
+    }
+
     #[test]
     pub fn opt_field_set_full_check() {
         let mut fieldset = OuterOptFieldSet::new();
