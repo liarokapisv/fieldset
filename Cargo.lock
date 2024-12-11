@@ -43,6 +43,8 @@ dependencies = [
 [[package]]
 name = "fieldset_macro"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c329bdfa14714b8c42884b9d3d56a8ec61f9f92ea520ff33b0ce33d6e7103dd2"
 dependencies = [
  "convert_case",
  "heck",
