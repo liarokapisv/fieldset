@@ -108,8 +108,7 @@ fn derive_setter_trait(name: String, fields: FieldsNamed) -> TokenStream {
             let method_name = get_field_identifier(field.clone());
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier =
-                    format_ident!("{}FieldSetter", type_identifier);
+                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
                 res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier));
             } else {
                 let ty = field.ty;
@@ -188,8 +187,7 @@ fn derive_raw_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> T
             let method_name = field_name.clone();
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier =
-                    format_ident!("{}FieldSetter", type_identifier);
+                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
                 res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier { &mut self.#field_name }));
             } else {
                 let ty = field.ty;
@@ -255,8 +253,7 @@ fn derive_opt_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> T
             let method_name = field_name.clone();
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier =
-                    format_ident!("{}FieldSetter", type_identifier);
+                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
                 res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier { &mut self.#field_name }));
             } else {
                 let ty = field.ty;
@@ -352,26 +349,10 @@ fn common_trait_impl_methods(
                 Some(x) => quote!(#x),
                 None => quote!(),
             };
-            let start_bit_expr = if is_bitset {
-                match index_expr.clone() {
-                    Some(x) => quote!((#x) / 32),
-                    None => quote!(),
-                }
-            } else {
-                start_expr.clone()
-            };
             let variance_identifier = get_variance_identifier(type_identifier.clone());
             let end_expr = match index_expr.clone() {
                 Some(x) => quote!(#x + #variance_identifier),
                 None => quote!(#variance_identifier),
-            };
-            let end_bit_expr = if is_bitset {
-                match index_expr.clone() {
-                    Some(x) => quote!((#x + #variance_identifier)/32),
-                    None => quote!(#variance_identifier / 32),
-                }
-            } else {
-                end_expr.clone()
             };
             prev_expr = Some(end_expr.clone());
             index = 0;
@@ -381,12 +362,17 @@ fn common_trait_impl_methods(
             } else {
                 format_ident!("PerfFieldSetter")
             };
+            let bitset_param = if is_bitset {
+                quote!(#bitset_expr.offset(#start_expr))
+            } else {
+                quote!(&mut #bitset_expr[#start_expr..#end_expr])
+            };
             res.push(quote!(
                 fn #method_name(&mut self) -> impl #field_setter_trait_identifier {
                     let f = #fun_expr;
                     fieldset::#setter_name(
-                    &mut #bitset_expr[#start_bit_expr..#end_bit_expr],
-                    &mut #fields_expr[#start_expr..#end_expr],
+                    #bitset_param,
+                    &mut #fields_expr,
                     &mut #len_expr,
                     move |x|
                             f(#fieldtype_identifier::#field_name_upper(x)))
@@ -401,11 +387,16 @@ fn common_trait_impl_methods(
             } else {
                 format_ident!("PerfFieldLeafSetter")
             };
+            let bitset_param = if is_bitset {
+                quote!(#bitset_expr.offset(0))
+            } else {
+                quote!(&mut #bitset_expr)
+            };
             res.push(quote!(
                 fn #method_name(&mut self) -> impl fieldset::FieldSetter<#ty> {
                     let f = #fun_expr;
                     fieldset::#leaf_setter_name::<#ty, _, _>(
-                        &mut #bitset_expr,
+                        #bitset_param,
                         &mut #fields_expr,
                         &mut #len_expr,
                         #index_expr, move |x| f(#fieldtype_identifier::#field_name_upper(x)), core::marker::PhantomData)
@@ -516,7 +507,7 @@ fn derive_bitset_fieldset(name: String, _fields: FieldsNamed) -> TokenStream {
     quote!(
         #[derive(Debug)]
         struct #fieldset_identifier  {
-            bitset: [u32 ; (#fieldset_variance + 31) / 32],
+            bitset: fieldset::BitSet<{(#fieldset_variance + 31) / 32}>,
             fields: [Option<#fieldtype_identifier> ; #fieldset_variance],
             len: usize,
         }
@@ -524,7 +515,7 @@ fn derive_bitset_fieldset(name: String, _fields: FieldsNamed) -> TokenStream {
         impl #fieldset_identifier {
             pub fn new() -> Self {
                 Self {
-                    bitset: [() ; (#fieldset_variance + 31) / 32].map(|_| 0),
+                    bitset: fieldset::BitSet::new(),
                     fields: [() ; #fieldset_variance].map(|_| None),
                     len: 0,
                 }

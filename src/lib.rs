@@ -1,4 +1,5 @@
 //! ![Maintenance](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
+//!
 //! [![CI](https://github.com/liarokapisv/fieldset/actions/workflows/ci.yml/badge.svg)](https://github.com/liarokapisv/fieldset/actions)
 //! [![docs](https://docs.rs/fieldset/badge.svg)](https://docs.rs/fieldset)
 //!
@@ -17,7 +18,7 @@
 //! There are multiple `FieldSetter` implementations with different tradeoffs regarding iteration and backup storage.
 //!
 //! - `OptFieldSet` is backed by a derived struct where each field is converted to an `Option`. Each iteration goes through all fields and is therefore suitable for smaller structures or frequent modifications.
-//! - `BitFieldSet` is backed by an iteration array of `FieldType` with length equal to the number of fields, and a `bitfield` that tracks which fields have been modified. Iteration is optimal and only goes through exactly as many fields as were modified. Has the drawback that each field can only be modified once before iteration and subsequent modifications are ignored. This is often a good compromise.
+//! - `BitFieldSet` is backed by an iteration array of `FieldType` with length equal to the number of fields, and a `bitset` that tracks which fields have been modified. Iteration is optimal and only goes through exactly as many fields as were modified. Has the drawback that each field can only be modified once before iteration and subsequent modifications are ignored. This is often a good compromise.
 //! - `PerfFieldSet` is backed by an array of `FieldType` of length equal to the number of fields and a complementary array that tracks which fields have been modified and their current position in the iteration array. Iteration is optimal and only goes through exactly as many fields as were modified. Fields can be modified multiple times and only the latest modification applies. Has the drawback of the extra space needed to track the multiple modifications.
 //!
 //! The library currently requires the usage of the nightly `impl_trait_in_assoc_type` feature.
@@ -69,6 +70,13 @@
 
 #![no_std]
 #![allow(dead_code)]
+#![cfg_attr(test, feature(impl_trait_in_assoc_type))]
+
+#[doc(hidden)]
+pub mod bitset;
+
+#[doc(hidden)]
+pub use bitset::{BitSet, BitSetOffsetted};
 
 use core::marker::PhantomData;
 
@@ -78,6 +86,7 @@ pub trait FieldSetter<T> {
     fn set(&mut self, value: T);
 }
 
+#[doc(hidden)]
 pub struct RawFieldSetter<'a, T>(pub &'a mut T);
 
 impl<'a, T> FieldSetter<T> for RawFieldSetter<'a, T> {
@@ -86,6 +95,7 @@ impl<'a, T> FieldSetter<T> for RawFieldSetter<'a, T> {
     }
 }
 
+#[doc(hidden)]
 pub struct OptFieldSetter<'a, T>(pub &'a mut Option<T>);
 
 impl<'a, T> FieldSetter<T> for OptFieldSetter<'a, T> {
@@ -94,8 +104,9 @@ impl<'a, T> FieldSetter<T> for OptFieldSetter<'a, T> {
     }
 }
 
+#[doc(hidden)]
 pub struct BitFieldLeafSetter<'a, V, T, F>(
-    pub &'a mut [u32],
+    pub BitSetOffsetted<'a>,
     pub &'a mut [T],
     pub &'a mut usize,
     pub usize,
@@ -103,18 +114,25 @@ pub struct BitFieldLeafSetter<'a, V, T, F>(
     pub PhantomData<V>,
 );
 
-pub struct BitFieldSetter<'a, T, F>(pub &'a mut [u32], pub &'a mut [T], pub &'a mut usize, pub F);
+#[doc(hidden)]
+pub struct BitFieldSetter<'a, T, F>(
+    pub BitSetOffsetted<'a>,
+    pub &'a mut [T],
+    pub &'a mut usize,
+    pub F,
+);
 
 impl<'a, V, T, F: Fn(V) -> T> FieldSetter<V> for BitFieldLeafSetter<'a, V, T, F> {
     fn set(&mut self, value: V) {
-        if self.0[self.3 / 32] & (1 << (self.3 % 32)) == 0 {
-            self.0[self.3 / 32] |= 1 << (self.3 % 32);
+        if !self.0.test(self.3) {
+            self.0.set(self.3);
             self.1[*self.2] = self.4(value);
             *self.2 += 1;
         }
     }
 }
 
+#[doc(hidden)]
 pub struct PerfFieldLeafSetter<'a, V, T, F>(
     pub &'a mut [u16],
     pub &'a mut [T],
@@ -124,6 +142,7 @@ pub struct PerfFieldLeafSetter<'a, V, T, F>(
     pub PhantomData<V>,
 );
 
+#[doc(hidden)]
 pub struct PerfFieldSetter<'a, T, F>(pub &'a mut [u16], pub &'a mut [T], pub &'a mut usize, pub F);
 
 impl<'a, V, T, F: Fn(V) -> T> FieldSetter<V> for PerfFieldLeafSetter<'a, V, T, F> {
@@ -135,5 +154,161 @@ impl<'a, V, T, F: Fn(V) -> T> FieldSetter<V> for PerfFieldLeafSetter<'a, V, T, F
         } else {
             self.1[self.0[self.3] as usize - 1] = self.4(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    extern crate self as fieldset;
+    use super::*;
+
+    #[derive(Clone, Copy, FieldSet)]
+    struct Inner3 {
+        field_7: f32,
+        field_8: u32,
+    }
+
+    #[derive(Clone, Copy, FieldSet)]
+    struct Inner2 {
+        field_5: f32,
+        field_6: u32,
+    }
+
+    #[derive(Clone, Copy, FieldSet)]
+    struct Inner {
+        field_3: f32,
+        field_4: u32,
+        #[fieldset]
+        field_i2: Inner2,
+        #[fieldset]
+        field_i3: Inner3,
+    }
+
+    #[derive(Clone, Copy, FieldSet)]
+    struct Outer {
+        field_1: f32,
+        field_2: u32,
+        #[fieldset]
+        field_i: Inner,
+    }
+
+    #[test]
+    pub fn opt_field_set_full_check() {
+        let mut fieldset = OuterOptFieldSet::new();
+        let e1 = OuterFieldType::Field1(1.0);
+        let e2 = OuterFieldType::Field2(2);
+        let e3 = OuterFieldType::FieldI(InnerFieldType::Field3(3.0));
+        let e4 = OuterFieldType::FieldI(InnerFieldType::Field4(4));
+        let e5 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field5(5.0)));
+        let e6 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field6(6)));
+        let e7 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.0)));
+        let e8 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field8(8)));
+
+        let e4_2 = OuterFieldType::FieldI(InnerFieldType::Field4(42));
+        let e7_2 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.2)));
+
+        fieldset.apply(e1);
+        fieldset.apply(e2);
+        fieldset.apply(e3);
+        fieldset.apply(e4);
+        fieldset.apply(e5);
+        fieldset.apply(e6);
+        fieldset.apply(e7);
+        fieldset.apply(e8);
+
+        fieldset.apply(e4_2);
+        fieldset.apply(e7_2);
+
+        let mut iter = fieldset.into_iter();
+
+        assert_eq!(iter.next(), Some(e1));
+        assert_eq!(iter.next(), Some(e2));
+        assert_eq!(iter.next(), Some(e3));
+        assert_eq!(iter.next(), Some(e4_2));
+        assert_eq!(iter.next(), Some(e5));
+        assert_eq!(iter.next(), Some(e6));
+        assert_eq!(iter.next(), Some(e7_2));
+        assert_eq!(iter.next(), Some(e8));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    pub fn bit_field_set_full_check() {
+        let mut fieldset = OuterBitFieldSet::new();
+        let e1 = OuterFieldType::Field1(1.0);
+        let e2 = OuterFieldType::Field2(2);
+        let e3 = OuterFieldType::FieldI(InnerFieldType::Field3(3.0));
+        let e4 = OuterFieldType::FieldI(InnerFieldType::Field4(4));
+        let e5 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field5(5.0)));
+        let e6 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field6(6)));
+        let e7 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.0)));
+        let e8 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field8(8)));
+
+        let e4_2 = OuterFieldType::FieldI(InnerFieldType::Field4(42));
+        let e7_2 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.2)));
+
+        fieldset.apply(e1);
+        fieldset.apply(e2);
+        fieldset.apply(e3);
+        fieldset.apply(e4);
+        fieldset.apply(e5);
+        fieldset.apply(e6);
+        fieldset.apply(e7);
+        fieldset.apply(e8);
+
+        fieldset.apply(e4_2); // ignored!
+        fieldset.apply(e7_2); // ignored!
+
+        let mut iter = fieldset.into_iter();
+
+        assert_eq!(iter.next(), Some(e1));
+        assert_eq!(iter.next(), Some(e2));
+        assert_eq!(iter.next(), Some(e3));
+        assert_eq!(iter.next(), Some(e4));
+        assert_eq!(iter.next(), Some(e5));
+        assert_eq!(iter.next(), Some(e6));
+        assert_eq!(iter.next(), Some(e7));
+        assert_eq!(iter.next(), Some(e8));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    pub fn perf_field_set_full_check() {
+        let mut fieldset = OuterPerfFieldSet::new();
+        let e1 = OuterFieldType::Field1(1.0);
+        let e2 = OuterFieldType::Field2(2);
+        let e3 = OuterFieldType::FieldI(InnerFieldType::Field3(3.0));
+        let e4 = OuterFieldType::FieldI(InnerFieldType::Field4(4));
+        let e5 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field5(5.0)));
+        let e6 = OuterFieldType::FieldI(InnerFieldType::FieldI2(Inner2FieldType::Field6(6)));
+        let e7 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.0)));
+        let e8 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field8(8)));
+
+        let e4_2 = OuterFieldType::FieldI(InnerFieldType::Field4(42));
+        let e7_2 = OuterFieldType::FieldI(InnerFieldType::FieldI3(Inner3FieldType::Field7(7.2)));
+
+        fieldset.apply(e1);
+        fieldset.apply(e2);
+        fieldset.apply(e3);
+        fieldset.apply(e4);
+        fieldset.apply(e5);
+        fieldset.apply(e6);
+        fieldset.apply(e7);
+        fieldset.apply(e8);
+
+        fieldset.apply(e4_2);
+        fieldset.apply(e7_2);
+
+        let mut iter = fieldset.into_iter();
+
+        assert_eq!(iter.next(), Some(e1));
+        assert_eq!(iter.next(), Some(e2));
+        assert_eq!(iter.next(), Some(e3));
+        assert_eq!(iter.next(), Some(e4_2));
+        assert_eq!(iter.next(), Some(e5));
+        assert_eq!(iter.next(), Some(e6));
+        assert_eq!(iter.next(), Some(e7_2));
+        assert_eq!(iter.next(), Some(e8));
+        assert_eq!(iter.next(), None);
     }
 }
