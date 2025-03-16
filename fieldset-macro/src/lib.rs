@@ -11,6 +11,14 @@ fn is_fieldset(field: Field) -> bool {
         .any(|i| *i == format_ident!("fieldset"))
 }
 
+fn is_skipped(field: Field) -> bool {
+    field
+        .attrs
+        .iter()
+        .filter_map(|a| a.path().get_ident())
+        .any(|i| *i == format_ident!("fieldset_skip"))
+}
+
 fn get_type_identifier(ty: Type) -> Ident {
     match ty {
         Type::Path(p) => {
@@ -41,6 +49,9 @@ fn derive_field_type(name: String, fields: FieldsNamed) -> TokenStream {
                     .to_string()
                     .to_upper_camel_case()
             );
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let field_type_identifier = format_ident!("{}FieldType", type_identifier);
@@ -72,6 +83,9 @@ fn derive_into_iterator(name: String, fields: FieldsNamed) -> TokenStream {
                 "{}",
                 field_identifier.clone().to_string().to_upper_camel_case()
             );
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 res.push(quote!(let iter = iter.chain(self.#field_identifier.into_iter().map(#fieldtype_identifier::#variant_name))));
             } else {
@@ -106,6 +120,9 @@ fn derive_setter_trait(name: String, fields: FieldsNamed) -> TokenStream {
         let mut res = Vec::new();
         for field in fields.clone().named {
             let method_name = get_field_identifier(field.clone());
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
@@ -125,6 +142,9 @@ fn derive_setter_trait(name: String, fields: FieldsNamed) -> TokenStream {
                 "{}",
                 field_identifier.clone().to_string().to_upper_camel_case()
             );
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 res.push(quote!(#field_type_identifier::#variant_name(x) => self.#field_identifier().apply(x)));
             } else {
@@ -161,6 +181,9 @@ fn derive_fieldset_variance(name: String, fields: FieldsNamed) -> TokenStream {
         let mut variances = Vec::new();
         let mut field_count: usize = 0;
         for field in fields.named {
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let variance_identifier = get_variance_identifier(type_identifier);
@@ -185,6 +208,9 @@ fn derive_raw_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> T
         for field in fields.named {
             let field_name = get_field_identifier(field.clone());
             let method_name = field_name.clone();
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
@@ -217,6 +243,9 @@ fn derive_opt_fieldset_type(name: String, fields: FieldsNamed) -> TokenStream {
         let mut res = Vec::new();
         for field in fields.named {
             let field_identifier = get_field_identifier(field.clone());
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let fieldset_identifier = format_ident!("{}OptFieldSet", type_identifier);
@@ -251,6 +280,9 @@ fn derive_opt_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> T
         for field in fields.named {
             let field_name = get_field_identifier(field.clone());
             let method_name = field_name.clone();
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 let type_identifier = get_type_identifier(field.ty);
                 let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
@@ -288,6 +320,9 @@ fn derive_opt_fieldset_into_iterator(name: String, fields: FieldsNamed) -> Token
                 "{}",
                 field_identifier.clone().to_string().to_upper_camel_case()
             );
+            if is_skipped(field.clone()) {
+                continue;
+            }
             if is_fieldset(field.clone()) {
                 res.push(quote!(let iter = iter.chain(self.#field_identifier.opt_iter().map(|x| x.map(#fieldtype_identifier::#variant_name)))));
             } else {
@@ -343,6 +378,9 @@ fn common_trait_impl_methods(
             (Some(x), 0) => Some(x),
             (Some(x), y) => Some(quote!(#x + #y)),
         };
+        if is_skipped(field.clone()) {
+            continue;
+        }
         if is_fieldset(field.clone()) {
             let type_identifier = get_type_identifier(field.ty);
             let start_expr = match index_expr.clone() {
@@ -564,7 +602,7 @@ fn derive_perf_fieldset(name: String, _fields: FieldsNamed) -> TokenStream {
     .into()
 }
 
-#[proc_macro_derive(FieldSet, attributes(fieldset))]
+#[proc_macro_derive(FieldSet, attributes(fieldset, fieldset_skip))]
 pub fn derive_fieldset(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     if let syn::Data::Struct(ref data) = input.data {

@@ -166,6 +166,8 @@ mod test {
     struct Inner3 {
         field_7: f32,
         field_8: u32,
+        #[fieldset_skip]
+        field_skipped: f32,
     }
 
     #[derive(Clone, Copy, FieldSet)]
