@@ -1,0 +1,6 @@
+error: `X::s`: `skip` cannot be combined with other keys
+  --> tests/ui/skip_with_nested.rs:10:5
+   |
+10 | /     #[fields(skip, nested)]
+11 | |     s: S,
+   | |________^

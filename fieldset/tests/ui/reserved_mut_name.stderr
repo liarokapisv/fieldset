@@ -1,0 +1,5 @@
+error: `X::set`: `set` is reserved on the write handle
+ --> tests/ui/reserved_mut_name.rs:5:5
+  |
+5 |     set: u8,
+  |     ^^^

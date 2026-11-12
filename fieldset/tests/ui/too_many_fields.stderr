@@ -1,0 +1,5 @@
+error: `X::f256`: `Fields` supports at most 256 fields
+   --> tests/ui/too_many_fields.rs:261:5
+    |
+261 |     f256: u8,
+    |     ^^^^

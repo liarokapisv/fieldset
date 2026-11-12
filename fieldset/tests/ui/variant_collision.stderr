@@ -1,0 +1,5 @@
+error: `X::aB`: variant `AB` is already used by field `a_b`
+ --> tests/ui/variant_collision.rs:6:5
+  |
+6 |     aB: u8,
+  |     ^^

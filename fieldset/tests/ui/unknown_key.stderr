@@ -1,0 +1,5 @@
+error: `X::a`: unknown `#[fields(..)]` key; expected `nested`, `skip` or `indexed`
+ --> tests/ui/unknown_key.rs:5:14
+  |
+5 |     #[fields(bogus)]
+  |              ^^^^^

@@ -1,0 +1,5 @@
+error: `X`: `Fields` can only be derived for a struct
+ --> tests/ui/union_input.rs:4:7
+  |
+4 | union X {
+  |       ^

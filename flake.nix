@@ -18,12 +18,13 @@
       ];
 
       buildToolchain = system: with fenix.packages.${system}; combine [
-        latest.cargo
-        latest.rustc
-        latest.clippy
-        latest.llvm-tools
-        latest.rustfmt
-        latest.rust-analyzer
+        stable.cargo
+        stable.rustc
+        stable.clippy
+        stable.llvm-tools
+        stable.rustfmt
+        stable.rust-analyzer
+        targets.thumbv7em-none-eabihf.stable.rust-std
       ];
     in
     {
@@ -40,7 +41,7 @@
           {
             default = buildRustPackage {
               pname = "fieldset";
-              version = "0.1.0";
+              version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
               src = ./.;
               cargoLock = {
                 lockFile = ./Cargo.lock;
@@ -64,7 +65,6 @@
                 cargo-expand
                 cargo-binutils
                 cargo-udeps
-                cargo-readme
                 clang-tools
               ];
             };

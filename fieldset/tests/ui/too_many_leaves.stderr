@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Fields` supports at most 65535 leaves
+ --> tests/ui/too_many_leaves.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^ evaluation of `_` failed here

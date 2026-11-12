@@ -1,0 +1,5 @@
+error: `X::leaf`: `leaf` is reserved on the path enum
+  --> tests/ui/reserved_path_name.rs:11:5
+   |
+11 |     leaf: S,
+   |     ^^^^

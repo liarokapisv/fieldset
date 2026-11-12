@@ -1,0 +1,82 @@
+error[E0277]: the trait bound `u8: Fields` is not satisfied
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^ the trait `Fields` is not implemented for `u8`
+  |
+help: the trait `Fields` is implemented for `X`
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^
+  = note: this error originates in the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `u8: Fields` is not satisfied
+ --> tests/ui/non_fields_nested.rs:6:8
+  |
+6 |     s: u8,
+  |        ^^ the trait `Fields` is not implemented for `u8`
+  |
+help: the trait `Fields` is implemented for `X`
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^
+  = note: this error originates in the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `u8: Fields` is not satisfied
+ --> tests/ui/non_fields_nested.rs:6:8
+  |
+6 |     s: u8,
+  |        ^^ the trait `Fields` is not implemented for `u8`
+  |
+help: the trait `Fields` is implemented for `X`
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^
+note: required by a bound in `nested`
+ --> tests/ui/non_fields_nested.rs:6:8
+  |
+6 |     s: u8,
+  |        ^^ required by this bound in `nested`
+  = note: this error originates in the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `u8: Fields` is not satisfied
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^ the trait `Fields` is not implemented for `u8`
+  |
+help: the trait `Fields` is implemented for `X`
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^
+  = note: this error originates in the derive macro `::core::cmp::PartialEq` which comes from the expansion of the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `u8: Fields` is not satisfied
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^ the trait `Fields` is not implemented for `u8`
+  |
+help: the trait `Fields` is implemented for `X`
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^
+  = note: this error originates in the derive macro `::core::fmt::Debug` which comes from the expansion of the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no associated function or constant named `from_leaf` found for type `_` in the current scope
+ --> tests/ui/non_fields_nested.rs:3:10
+  |
+3 | #[derive(Fields)]
+  |          ^^^^^^ associated function or constant not found in `_`
+  |
+  = help: items from traits can only be used if the trait is in scope
+  = note: this error originates in the derive macro `Fields` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: trait `Path` which provides `from_leaf` is implemented but not in scope; perhaps you want to import it
+  |
+1 + use fieldset::Path;
+  |

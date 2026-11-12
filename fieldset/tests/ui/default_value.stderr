@@ -1,0 +1,13 @@
+error: `X::a`: `Fields` does not support default field values
+ --> tests/ui/default_value.rs:5:13
+  |
+5 |     a: u8 = 0,
+  |             ^
+
+error[E0658]: default values on fields are experimental
+ --> tests/ui/default_value.rs:5:10
+  |
+5 |     a: u8 = 0,
+  |          ^^^^
+  |
+  = note: see issue #132162 <https://github.com/rust-lang/rust/issues/132162> for more information

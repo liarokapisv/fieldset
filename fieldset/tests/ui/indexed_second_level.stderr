@@ -1,0 +1,5 @@
+error: `X::g`: `indexed` supports one level of indexing
+ --> tests/ui/indexed_second_level.rs:6:9
+  |
+6 |     g: [[u8; 2]; 3],
+  |         ^^^^^^^

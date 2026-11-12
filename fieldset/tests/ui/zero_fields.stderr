@@ -1,0 +1,5 @@
+error: `X`: `Fields` requires at least one field that is not skipped
+ --> tests/ui/zero_fields.rs:4:8
+  |
+4 | struct X {
+  |        ^

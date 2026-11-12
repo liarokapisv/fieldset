@@ -1,0 +1,5 @@
+error: `X`: `Fields` can only be derived for a struct
+ --> tests/ui/enum_input.rs:4:6
+  |
+4 | enum X {
+  |      ^

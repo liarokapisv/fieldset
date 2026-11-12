@@ -1,0 +1,5 @@
+error: `X::s`: duplicate `#[fields(..)]` key
+  --> tests/ui/duplicate_key.rs:10:22
+   |
+10 |     #[fields(nested, nested)]
+   |                      ^^^^^^

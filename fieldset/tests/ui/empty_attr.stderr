@@ -1,0 +1,5 @@
+error: `X::a`: empty `#[fields()]`; expected `nested`, `skip` or `indexed`
+ --> tests/ui/empty_attr.rs:5:5
+  |
+5 |     #[fields()]
+  |     ^^^^^^^^^^^

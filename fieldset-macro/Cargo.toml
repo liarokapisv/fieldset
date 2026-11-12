@@ -1,17 +1,25 @@
 [package]
 name = "fieldset_macro"
-version = "0.1.4"
-edition = "2021"
-description = "fieldset macro crate"
-license = "MIT"
-repository = "https://github.com/liarokapisv/fieldset"
+description = "Derive macro for the fieldset crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn = { version = "2.0.58", features = [ "full", "parsing" ] }
-quote = "1.0.36"
-convert_case = "0.6.0"
-heck = "0.5.0"
-proc-macro2 = "1.0.79"
+syn = "3"
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

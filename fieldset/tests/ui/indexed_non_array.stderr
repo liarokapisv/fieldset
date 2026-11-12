@@ -1,0 +1,5 @@
+error: `X::a`: `indexed` requires an array type `[T; N]`
+ --> tests/ui/indexed_non_array.rs:6:8
+  |
+6 |     a: u8,
+  |        ^^

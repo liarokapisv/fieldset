@@ -1,0 +1,5 @@
+error: `X`: `Fields` requires named fields
+ --> tests/ui/tuple_struct.rs:4:9
+  |
+4 | struct X(u8);
+  |         ^^^^

@@ -1,686 +1,388 @@
-use heck::{ToShoutySnakeCase, ToUpperCamelCase};
-use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{parse_macro_input, DeriveInput, Field, FieldsNamed, Ident, Type};
+//! Derive macro for the `fieldset` crate.
 
-fn is_fieldset(field: Field) -> bool {
-    field
-        .attrs
-        .iter()
-        .filter_map(|a| a.path().get_ident())
-        .any(|i| *i == format_ident!("fieldset"))
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+mod fields_impl;
+mod handles;
+mod paths;
+
+use heck::ToUpperCamelCase;
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote_spanned};
+use syn::ext::IdentExt;
+use syn::spanned::Spanned;
+use syn::{
+    Attribute, Data, DeriveInput, Error, Expr, Field, Fields, Ident, Result, Type, Visibility,
+};
+
+const MAX_FIELDS: usize = u8::MAX as usize + 1;
+const RESERVED_HANDLE_NAMES: [&str; 3] = ["model", "set", "mark_all"];
+const RESERVED_PATH_NAMES: [&str; 2] = ["leaf", "from_leaf"];
+
+/// Derives `fieldset::Fields` for a struct of `Copy` leaves, nested `Fields`
+/// subtrees and indexed arrays of either.
+///
+/// For a struct `X` this generates the path enum `XPath`, the write handle
+/// `XMut<'a>` and `impl fieldset::Fields for X`, all with the visibility of
+/// `X`. Leaves are numbered in declaration order; a `#[fields(nested)]` field
+/// contributes the leaves of its own type, contiguously; a
+/// `#[fields(indexed)]` field of type `[T; N]` contributes one leaf per
+/// element; a `#[fields(indexed, nested)]` field of type `[S; N]` contributes
+/// the leaves of `S` once per element, element after element; and a
+/// `#[fields(skip)]` field contributes nothing.
+#[proc_macro_derive(Fields, attributes(fields))]
+pub fn derive_fields(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = syn::parse_macro_input!(input as DeriveInput);
+    expand(&input)
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }
 
-fn is_skipped(field: Field) -> bool {
-    field
-        .attrs
-        .iter()
-        .filter_map(|a| a.path().get_ident())
-        .any(|i| *i == format_ident!("fieldset_skip"))
+/// How a non-skipped field takes part in the derive.
+#[derive(Clone, Copy)]
+enum Kind<'a> {
+    /// A `Copy` value addressed by one leaf.
+    Leaf,
+    /// A `Fields` value whose leaves are spliced in at this field's base.
+    Nested,
+    /// A `[T; N]` of `Copy` elements, one leaf per element.
+    Indexed { elem: &'a Type, len: &'a Expr },
+    /// A `[S; N]` of `Fields` elements, the leaves of `S` once per element.
+    IndexedNested { elem: &'a Type, len: &'a Expr },
 }
 
-fn get_type_identifier(ty: Type) -> Ident {
-    match ty {
-        Type::Path(p) => {
-            assert!(p.clone().qself.is_none());
-            p.path
-                .get_ident()
-                .expect("field type must be a path with an identifier")
-                .clone()
+/// A non-skipped field.
+struct Member<'a> {
+    /// Position among the non-skipped fields, in declaration order.
+    position: u8,
+    ident: &'a Ident,
+    variant: Ident,
+    ty: &'a Type,
+    kind: Kind<'a>,
+}
+
+impl<'a> Member<'a> {
+    /// The private associated const on the path enum holding this member's
+    /// first leaf, relative to the struct.
+    fn base_ident(&self) -> Ident {
+        format_ident!("BASE_{}", self.position)
+    }
+
+    /// The private associated const on the path enum holding the element
+    /// count of this indexed member.
+    fn len_ident(&self) -> Ident {
+        format_ident!("LEN_{}", self.position)
+    }
+
+    /// The type one leaf or subtree of this member has: the element type of
+    /// an indexed member, the field type otherwise.
+    fn element(&self) -> &'a Type {
+        match self.kind {
+            Kind::Leaf | Kind::Nested => self.ty,
+            Kind::Indexed { elem, .. } | Kind::IndexedNested { elem, .. } => elem,
         }
-        _ => panic!("unsupported field type"),
+    }
+
+    /// Whether each element is a `Fields` subtree rather than a `Copy` leaf.
+    fn is_nested(&self) -> bool {
+        matches!(self.kind, Kind::Nested | Kind::IndexedNested { .. })
+    }
+
+    /// The array length of an indexed member.
+    fn len(&self) -> Option<&'a Expr> {
+        match self.kind {
+            Kind::Leaf | Kind::Nested => None,
+            Kind::Indexed { len, .. } | Kind::IndexedNested { len, .. } => Some(len),
+        }
+    }
+
+    /// The number of leaves this member contributes, as a `usize` expression;
+    /// `None` for a plain leaf, which the caller counts as one.
+    fn count(&self) -> Option<TokenStream> {
+        let elem = self.element();
+        match (self.len(), self.is_nested()) {
+            (None, false) => None,
+            (None, true) => Some(quote::quote!(<#elem as ::fieldset::Fields>::COUNT)),
+            (Some(len), false) => Some(quote::quote!((#len))),
+            (Some(len), true) => Some(quote::quote!((#len) * <#elem as ::fieldset::Fields>::COUNT)),
+        }
+    }
+
+    /// The number of leaves this member contributes, as a `u16` expression.
+    fn count_u16(&self) -> TokenStream {
+        let elem = self.element();
+        match (self.len(), self.is_nested()) {
+            (None, false) => quote::quote!(1),
+            (None, true) => quote::quote!((<#elem as ::fieldset::Fields>::COUNT as u16)),
+            (Some(len), false) => quote::quote!(((#len) as u16)),
+            (Some(len), true) => {
+                quote::quote!((((#len) * <#elem as ::fieldset::Fields>::COUNT) as u16))
+            }
+        }
     }
 }
 
-fn get_field_identifier(field: Field) -> Ident {
-    field
-        .ident
-        .expect("Cannot derive field type from tuple structs")
+struct Model<'a> {
+    vis: &'a Visibility,
+    ident: &'a Ident,
+    path_ident: Ident,
+    mut_ident: Ident,
+    members: Vec<Member<'a>>,
 }
 
-fn derive_field_type(name: String, fields: FieldsNamed) -> TokenStream {
-    let derived_field_type_identifier = format_ident!("{}FieldType", name);
-    let enum_variants = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let variant_name = format_ident!(
-                "{}",
-                get_field_identifier(field.clone())
-                    .to_string()
-                    .to_upper_camel_case()
-            );
-            if is_skipped(field.clone()) {
-                continue;
+fn expand(input: &DeriveInput) -> Result<TokenStream> {
+    let model = parse(input)?;
+    let ident = model.ident;
+    let bound_checks = model.members.iter().map(|member| {
+        let checked = member.element();
+        if member.is_nested() {
+            quote_spanned! {checked.span()=>
+                const _: () = {
+                    const fn nested<T: ::fieldset::Fields>() {}
+                    nested::<#checked>();
+                };
             }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let field_type_identifier = format_ident!("{}FieldType", type_identifier);
-                res.push(quote!(#variant_name(#field_type_identifier)));
-            } else {
-                let ty = field.ty;
-                res.push(quote!(#variant_name(#ty)));
-            }
-        }
-        res
-    };
-    quote!(
-        #[derive(Clone, Copy, Debug, PartialEq)]
-        pub enum #derived_field_type_identifier {
-            #(#enum_variants ,)*
-        }
-    )
-    .into()
-}
-
-fn derive_into_iterator(name: String, fields: FieldsNamed) -> TokenStream {
-    let identifier = format_ident!("{}", name);
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let iter_chains = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_identifier = get_field_identifier(field.clone());
-            let variant_name = format_ident!(
-                "{}",
-                field_identifier.clone().to_string().to_upper_camel_case()
-            );
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                res.push(quote!(let iter = iter.chain(self.#field_identifier.into_iter().map(#fieldtype_identifier::#variant_name))));
-            } else {
-                res.push(quote!(let iter = iter.chain(once(#fieldtype_identifier::#variant_name(self.#field_identifier)))));
-            }
-        }
-        res
-    };
-    quote!(
-        impl IntoIterator for #identifier {
-            type Item = #fieldtype_identifier;
-            type IntoIter = impl Iterator<Item = Self::Item> + Clone + core::fmt::Debug;
-
-            fn into_iter(self) -> Self::IntoIter {
-                use core::iter::empty;
-                use core::iter::once;
-                let iter = empty();
-
-                #( #iter_chains ;)*
-
-                iter
-            }
-        }
-    )
-    .into()
-}
-
-fn derive_setter_trait(name: String, fields: FieldsNamed) -> TokenStream {
-    let derived_setter_trait_identifier = format_ident!("{}FieldSetter", name);
-    let field_type_identifier = format_ident!("{}FieldType", name);
-    let methods = {
-        let mut res = Vec::new();
-        for field in fields.clone().named {
-            let method_name = get_field_identifier(field.clone());
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
-                res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier));
-            } else {
-                let ty = field.ty;
-                res.push(quote!(fn #method_name(&mut self) -> impl fieldset::FieldSetter<#ty>));
-            }
-        }
-        res
-    };
-    let match_arms = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_identifier = get_field_identifier(field.clone());
-            let variant_name = format_ident!(
-                "{}",
-                field_identifier.clone().to_string().to_upper_camel_case()
-            );
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                res.push(quote!(#field_type_identifier::#variant_name(x) => self.#field_identifier().apply(x)));
-            } else {
-                res.push(
-                    quote!(#field_type_identifier::#variant_name(x) => self.#field_identifier().set(x)),
-                );
-            }
-        }
-        res
-    };
-
-    quote!(
-        pub trait #derived_setter_trait_identifier {
-            #( #methods ;)*
-
-            fn apply(&mut self, field: #field_type_identifier) {
-                match field {
-                    #( #match_arms ,)*
-                }
-            }
-        }
-    )
-    .into()
-}
-
-fn get_variance_identifier(ty: Ident) -> Ident {
-    format_ident!("{}_VARIANCE", ty.to_string().to_shouty_snake_case())
-}
-
-fn derive_fieldset_variance(name: String, fields: FieldsNamed) -> TokenStream {
-    let identifier = format_ident!("{}", name);
-    let variance_identifier = get_variance_identifier(identifier);
-    let variance = {
-        let mut variances = Vec::new();
-        let mut field_count: usize = 0;
-        for field in fields.named {
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let variance_identifier = get_variance_identifier(type_identifier);
-                variances.push(quote!(#variance_identifier));
-            } else {
-                field_count += 1;
-            }
-        }
-        quote!(#( #variances +)* #field_count)
-    };
-    quote!(
-        const #variance_identifier : usize = #variance;
-    )
-    .into()
-}
-
-fn derive_raw_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> TokenStream {
-    let identifier = format_ident!("{}", name);
-    let setter_trait_identifier = format_ident!("{}FieldSetter", name);
-    let methods = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_name = get_field_identifier(field.clone());
-            let method_name = field_name.clone();
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
-                res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier { &mut self.#field_name }));
-            } else {
-                let ty = field.ty;
-                res.push(
-                    quote!(fn #method_name(&mut self) -> impl fieldset::FieldSetter<#ty> { fieldset::RawFieldSetter(&mut self.#field_name) }),
-                );
-            }
-        }
-        res
-    };
-
-    quote!(
-        impl #setter_trait_identifier for &mut #identifier {
-            #( #methods )*
-        }
-
-        impl #setter_trait_identifier for #identifier {
-            #( #methods )*
-        }
-    )
-    .into()
-}
-
-fn derive_opt_fieldset_type(name: String, fields: FieldsNamed) -> TokenStream {
-    let derived_fieldset_identifier = format_ident!("{}OptFieldSet", name);
-    let opt_fields = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_identifier = get_field_identifier(field.clone());
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let fieldset_identifier = format_ident!("{}OptFieldSet", type_identifier);
-                res.push(quote!(#field_identifier : #fieldset_identifier));
-            } else {
-                let ty = field.ty;
-                res.push(quote!(#field_identifier : Option<#ty>))
-            }
-        }
-        res
-    };
-    quote!(
-        #[derive(Debug, Default)]
-        pub struct #derived_fieldset_identifier {
-            #(#opt_fields ,)*
-        }
-
-        impl #derived_fieldset_identifier {
-            pub fn new() -> Self {
-                Default::default()
-            }
-        }
-    )
-    .into()
-}
-
-fn derive_opt_fieldset_setter_trait_impl(name: String, fields: FieldsNamed) -> TokenStream {
-    let setter_trait_identifier = format_ident!("{}FieldSetter", name);
-    let fieldset_identifier = format_ident!("{}OptFieldSet", name);
-    let methods = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_name = get_field_identifier(field.clone());
-            let method_name = field_name.clone();
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                let type_identifier = get_type_identifier(field.ty);
-                let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
-                res.push(quote!(fn #method_name(&mut self) -> impl #field_setter_trait_identifier { &mut self.#field_name }));
-            } else {
-                let ty = field.ty;
-                res.push(
-                    quote!(fn #method_name(&mut self) -> impl fieldset::FieldSetter<#ty> { fieldset::OptFieldSetter(&mut self.#field_name) }),
-                );
-            }
-        }
-        res
-    };
-
-    quote!(
-        impl #setter_trait_identifier for &mut #fieldset_identifier {
-            #( #methods )*
-        }
-
-        impl #setter_trait_identifier for #fieldset_identifier {
-            #( #methods )*
-        }
-    )
-    .into()
-}
-
-fn derive_opt_fieldset_into_iterator(name: String, fields: FieldsNamed) -> TokenStream {
-    let fieldset_identifier = format_ident!("{}OptFieldSet", name);
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let iter_chains = {
-        let mut res = Vec::new();
-        for field in fields.named {
-            let field_identifier = get_field_identifier(field.clone());
-            let variant_name = format_ident!(
-                "{}",
-                field_identifier.clone().to_string().to_upper_camel_case()
-            );
-            if is_skipped(field.clone()) {
-                continue;
-            }
-            if is_fieldset(field.clone()) {
-                res.push(quote!(let iter = iter.chain(self.#field_identifier.opt_iter().map(|x| x.map(#fieldtype_identifier::#variant_name)))));
-            } else {
-                res.push(quote!(let iter = iter.chain(once(self.#field_identifier.map(#fieldtype_identifier::#variant_name)))));
-            }
-        }
-        res
-    };
-    quote!(
-        impl #fieldset_identifier {
-            fn opt_iter(self) -> impl Iterator<Item = Option<#fieldtype_identifier>> + Clone + core::fmt::Debug {
-                use core::iter::empty;
-                use core::iter::once;
-                let iter = empty();
-
-                #( #iter_chains ;)*
-
-                iter
-            }
-        }
-
-        impl IntoIterator for #fieldset_identifier {
-            type Item = #fieldtype_identifier;
-            type IntoIter = impl Iterator<Item = Self::Item> + Clone + core::fmt::Debug;
-
-            fn into_iter(self) -> Self::IntoIter {
-                self.opt_iter().flatten()
-            }
-        }
-    )
-    .into()
-}
-
-fn common_trait_impl_methods(
-    bitset_expr: proc_macro2::TokenStream,
-    fields_expr: proc_macro2::TokenStream,
-    len_expr: proc_macro2::TokenStream,
-    fun_expr: proc_macro2::TokenStream,
-    is_bitset: bool,
-    name: String,
-    fields: FieldsNamed,
-) -> proc_macro2::TokenStream {
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let mut res = Vec::new();
-    let mut prev_expr = None;
-    let mut index: usize = 0;
-    for field in fields.named {
-        let method_name = get_field_identifier(field.clone());
-        let field_name_upper = format_ident!("{}", method_name.to_string().to_upper_camel_case());
-        let index_expr = match (prev_expr.clone(), index) {
-            (None, 0) => None,
-            (None, y) => Some(quote!(#y)),
-            (Some(x), 0) => Some(x),
-            (Some(x), y) => Some(quote!(#x + #y)),
-        };
-        if is_skipped(field.clone()) {
-            continue;
-        }
-        if is_fieldset(field.clone()) {
-            let type_identifier = get_type_identifier(field.ty);
-            let start_expr = match index_expr.clone() {
-                Some(x) => quote!(#x),
-                None => quote!(0),
-            };
-            let variance_identifier = get_variance_identifier(type_identifier.clone());
-            let end_expr = match index_expr.clone() {
-                Some(x) => quote!(#x + #variance_identifier),
-                None => quote!(#variance_identifier),
-            };
-            prev_expr = Some(end_expr.clone());
-            index = 0;
-            let field_setter_trait_identifier = format_ident!("{}FieldSetter", type_identifier);
-            let setter_name = if is_bitset {
-                format_ident!("BitFieldSetter")
-            } else {
-                format_ident!("PerfFieldSetter")
-            };
-            let bitset_param = if is_bitset {
-                quote!(#bitset_expr.offset(#start_expr))
-            } else {
-                quote!(&mut #bitset_expr[#start_expr..#end_expr])
-            };
-            res.push(quote!(
-                fn #method_name(&mut self) -> impl #field_setter_trait_identifier {
-                    let f = #fun_expr;
-                    fieldset::#setter_name(
-                    #bitset_param,
-                    &mut #fields_expr,
-                    &mut #len_expr,
-                    move |x|
-                            f(#fieldtype_identifier::#field_name_upper(x)))
-                }
-            ));
         } else {
-            let ty = field.ty;
-            let index_expr = index_expr.or_else(|| quote!(0usize).into());
-            index += 1;
-            let leaf_setter_name = if is_bitset {
-                format_ident!("BitFieldLeafSetter")
-            } else {
-                format_ident!("PerfFieldLeafSetter")
-            };
-            let bitset_param = if is_bitset {
-                quote!(#bitset_expr.offset(0))
-            } else {
-                quote!(&mut #bitset_expr)
-            };
-            res.push(quote!(
-                fn #method_name(&mut self) -> impl fieldset::FieldSetter<#ty> {
-                    let f = #fun_expr;
-                    fieldset::#leaf_setter_name::<#ty, _, _>(
-                        #bitset_param,
-                        &mut #fields_expr,
-                        &mut #len_expr,
-                        #index_expr, move |x| f(#fieldtype_identifier::#field_name_upper(x)), core::marker::PhantomData)
-                }
+            quote_spanned! {checked.span()=>
+                const _: () = {
+                    const fn leaf<T: ::core::marker::Copy>() {}
+                    leaf::<#checked>();
+                };
+            }
+        }
+    });
+    let paths = paths::expand(&model);
+    let handles = handles::expand(&model);
+    let fields_impl = fields_impl::expand(&model);
+    Ok(quote::quote! {
+        #(#bound_checks)*
+        #paths
+        #handles
+        #fields_impl
+        const _: () = ::core::assert!(
+            <#ident as ::fieldset::Fields>::COUNT <= u16::MAX as usize,
+            "`Fields` supports at most 65535 leaves"
+        );
+    })
+}
+
+fn parse(input: &DeriveInput) -> Result<Model<'_>> {
+    let ident = &input.ident;
+    reject_fields_attrs(&input.attrs, ident)?;
+    if !input.generics.params.is_empty() {
+        return Err(Error::new_spanned(
+            &input.generics,
+            format!("`{ident}`: `Fields` cannot be derived for a generic struct"),
+        ));
+    }
+    if let Some(where_clause) = &input.generics.where_clause {
+        return Err(Error::new_spanned(
+            where_clause,
+            format!("`{ident}`: `Fields` cannot be derived for a generic struct"),
+        ));
+    }
+    let data = match &input.data {
+        Data::Struct(data) => data,
+        Data::Enum(_) | Data::Union(_) => {
+            return Err(Error::new_spanned(
+                ident,
+                format!("`{ident}`: `Fields` can only be derived for a struct"),
             ));
+        }
+    };
+    let named = match &data.fields {
+        Fields::Named(named) => &named.named,
+        Fields::Unnamed(unnamed) => {
+            return Err(Error::new_spanned(
+                unnamed,
+                format!("`{ident}`: `Fields` requires named fields"),
+            ));
+        }
+        Fields::Unit => {
+            return Err(Error::new_spanned(
+                ident,
+                format!("`{ident}`: `Fields` requires named fields"),
+            ));
+        }
+    };
+    let mut members: Vec<Member<'_>> = Vec::with_capacity(named.len());
+    for field in named {
+        if let Some(member) = parse_field(ident, members.len(), field)? {
+            if let Some(earlier) = members.iter().find(|m| m.variant == member.variant) {
+                return Err(Error::new_spanned(
+                    member.ident,
+                    format!(
+                        "`{ident}::{}`: variant `{}` is already used by field `{}`",
+                        member.ident, member.variant, earlier.ident
+                    ),
+                ));
+            }
+            members.push(member);
         }
     }
-    quote!(#(#res )*)
-}
-
-fn derive_common_fieldset_setter_trait_impl(
-    is_bitset: bool,
-    name: String,
-    fields: FieldsNamed,
-) -> TokenStream {
-    let bitset_expr = quote!(self.0);
-    let fields_expr = quote!(self.1);
-    let len_expr = quote!(self.2);
-    let fun_expr = quote!(self.3);
-    let trait_identifier = format_ident!("{}FieldSetter", name);
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let methods = common_trait_impl_methods(
-        bitset_expr,
-        fields_expr,
-        len_expr,
-        fun_expr,
-        is_bitset,
-        name,
-        fields,
-    );
-    let setters_name = if is_bitset {
-        format_ident!("BitFieldSetter")
-    } else {
-        format_ident!("PerfFieldSetter")
-    };
-    quote!(
-        impl<'a, T, F: Fn(#fieldtype_identifier) -> T + Copy> #trait_identifier for fieldset::#setters_name<'a, T, F> {
-            #methods
-        }
-    ).into()
-}
-
-fn derive_common_fieldset_trait_impl(
-    is_bitset: bool,
-    name: String,
-    fields: FieldsNamed,
-) -> TokenStream {
-    let bitset_expr = quote!(self.bitset);
-    let fields_expr = quote!(self.fields);
-    let len_expr = quote!(self.len);
-    let fun_expr = quote!(Some);
-    let trait_identifier = format_ident!("{}FieldSetter", name);
-    let fieldset_identifier = if is_bitset {
-        format_ident!("{}BitFieldSet", name)
-    } else {
-        format_ident!("{}PerfFieldSet", name)
-    };
-    let methods = common_trait_impl_methods(
-        bitset_expr,
-        fields_expr,
-        len_expr,
-        fun_expr,
-        is_bitset,
-        name,
-        fields,
-    );
-    quote!(
-        impl #trait_identifier for #fieldset_identifier {
-            #methods
-        }
-
-        impl #trait_identifier for &mut #fieldset_identifier {
-            #methods
-        }
-    )
-    .into()
-}
-
-fn derive_common_fieldset_into_iterator(
-    is_bitset: bool,
-    name: String,
-    _fields: FieldsNamed,
-) -> TokenStream {
-    let fieldset_identifier = if is_bitset {
-        format_ident!("{}BitFieldSet", name)
-    } else {
-        format_ident!("{}PerfFieldSet", name)
-    };
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    quote!(
-        impl IntoIterator for #fieldset_identifier {
-            type Item = #fieldtype_identifier;
-            type IntoIter = impl Iterator<Item = Self::Item> + Clone + core::fmt::Debug;
-
-            fn into_iter(self) -> Self::IntoIter {
-                self.fields.into_iter().map_while(|x| x)
-            }
-        }
-    )
-    .into()
-}
-
-fn derive_bitset_fieldset(name: String, _fields: FieldsNamed) -> TokenStream {
-    let identifier = format_ident!("{}", name);
-    let fieldset_identifier = format_ident!("{}BitFieldSet", name);
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let fieldset_variance = get_variance_identifier(identifier);
-    quote!(
-        #[derive(Debug)]
-        struct #fieldset_identifier  {
-            bitset: fieldset::BitSet<{(#fieldset_variance + 31) / 32}>,
-            fields: [Option<#fieldtype_identifier> ; #fieldset_variance],
-            len: usize,
-        }
-
-        impl #fieldset_identifier {
-            pub fn new() -> Self {
-                Self {
-                    bitset: fieldset::BitSet::new(),
-                    fields: [() ; #fieldset_variance].map(|_| None),
-                    len: 0,
-                }
-            }
-        }
-
-        impl Default for #fieldset_identifier {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
-    )
-    .into()
-}
-
-fn derive_perf_fieldset(name: String, _fields: FieldsNamed) -> TokenStream {
-    let identifier = format_ident!("{}", name);
-    let fieldset_identifier = format_ident!("{}PerfFieldSet", name);
-    let fieldtype_identifier = format_ident!("{}FieldType", name);
-    let fieldset_variance = get_variance_identifier(identifier);
-    quote!(
-        #[derive(Debug)]
-        pub struct #fieldset_identifier  {
-            bitset: [u16 ; #fieldset_variance],
-            fields: [Option<#fieldtype_identifier> ; #fieldset_variance],
-            len: usize,
-        }
-
-        impl #fieldset_identifier {
-            pub fn new() -> Self {
-                Self {
-                    bitset: [() ; #fieldset_variance].map(|_| 0),
-                    fields: [() ; #fieldset_variance].map(|_| None),
-                    len: 0,
-                }
-            }
-        }
-
-        impl Default for #fieldset_identifier {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-    )
-    .into()
-}
-
-#[proc_macro_derive(FieldSet, attributes(fieldset, fieldset_skip))]
-pub fn derive_fieldset(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    if let syn::Data::Struct(ref data) = input.data {
-        if let syn::Fields::Named(ref fields) = data.fields {
-            let mut result = TokenStream::default();
-            result.extend(derive_field_type(input.ident.to_string(), fields.clone()));
-            result.extend(derive_into_iterator(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_setter_trait(input.ident.to_string(), fields.clone()));
-            result.extend(derive_fieldset_variance(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_raw_fieldset_setter_trait_impl(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_opt_fieldset_type(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_opt_fieldset_setter_trait_impl(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_opt_fieldset_into_iterator(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_bitset_fieldset(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_setter_trait_impl(
-                true,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_trait_impl(
-                true,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_into_iterator(
-                true,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_perf_fieldset(
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_setter_trait_impl(
-                false,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_trait_impl(
-                false,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            result.extend(derive_common_fieldset_into_iterator(
-                false,
-                input.ident.to_string(),
-                fields.clone(),
-            ));
-            return result;
-        }
+    if members.is_empty() {
+        return Err(Error::new_spanned(
+            ident,
+            format!("`{ident}`: `Fields` requires at least one field that is not skipped"),
+        ));
     }
+    Ok(Model {
+        vis: &input.vis,
+        ident,
+        path_ident: format_ident!("{ident}Path"),
+        mut_ident: format_ident!("{ident}Mut"),
+        members,
+    })
+}
 
-    TokenStream::from(
-        syn::Error::new(
-            input.ident.span(),
-            "Only structs with named fields can derive `FieldEvents`",
+/// Parses one field; `None` for a skipped one.
+fn parse_field<'a>(owner: &Ident, position: usize, field: &'a Field) -> Result<Option<Member<'a>>> {
+    field.modifiers.require_empty()?;
+    let ident = field.ident.as_ref().ok_or_else(|| {
+        Error::new_spanned(field, format!("`{owner}`: `Fields` requires named fields"))
+    })?;
+    if let Some((_, default)) = &field.default {
+        return Err(Error::new_spanned(
+            default,
+            format!("`{owner}::{ident}`: `Fields` does not support default field values"),
+        ));
+    }
+    let Some(keys) = parse_field_attrs(owner, ident, field)? else {
+        return Ok(None);
+    };
+    let name = ident.unraw().to_string();
+    if RESERVED_HANDLE_NAMES.contains(&name.as_str()) {
+        return Err(Error::new_spanned(
+            ident,
+            format!("`{owner}::{ident}`: `{name}` is reserved on the write handle"),
+        ));
+    }
+    let kind = match (keys.indexed, keys.nested) {
+        (false, false) => Kind::Leaf,
+        (false, true) => Kind::Nested,
+        (true, nested) => {
+            let (elem, len) = indexed_parts(owner, ident, &field.ty)?;
+            if nested {
+                Kind::IndexedNested { elem, len }
+            } else {
+                Kind::Indexed { elem, len }
+            }
+        }
+    };
+    if keys.nested && RESERVED_PATH_NAMES.contains(&name.as_str()) {
+        return Err(Error::new_spanned(
+            ident,
+            format!("`{owner}::{ident}`: `{name}` is reserved on the path enum"),
+        ));
+    }
+    let position = u8::try_from(position).map_err(|_| {
+        Error::new_spanned(
+            ident,
+            format!("`{owner}::{ident}`: `Fields` supports at most {MAX_FIELDS} fields"),
         )
-        .to_compile_error(),
-    )
+    })?;
+    let variant_name = name.to_upper_camel_case();
+    let variant = syn::parse_str::<Ident>(&variant_name).map_err(|_| {
+        Error::new_spanned(
+            ident,
+            format!("`{owner}::{ident}`: `{variant_name}` is not a usable variant name"),
+        )
+    })?;
+    Ok(Some(Member {
+        position,
+        ident,
+        variant,
+        ty: &field.ty,
+        kind,
+    }))
+}
+
+/// The `#[fields(..)]` keys of a field that is not skipped.
+struct Keys {
+    nested: bool,
+    indexed: bool,
+}
+
+/// Reads the `#[fields(..)]` attributes of a field; `None` means skipped.
+fn parse_field_attrs(owner: &Ident, ident: &Ident, field: &Field) -> Result<Option<Keys>> {
+    let mut nested = false;
+    let mut skip = false;
+    let mut indexed = false;
+    for attr in field.attrs.iter().filter(|attr| is_fields(attr)) {
+        let mut seen = false;
+        attr.parse_nested_meta(|meta| {
+            seen = true;
+            let flag = if meta.path.is_ident("nested") {
+                &mut nested
+            } else if meta.path.is_ident("skip") {
+                &mut skip
+            } else if meta.path.is_ident("indexed") {
+                &mut indexed
+            } else {
+                return Err(meta.error(format!(
+                    "`{owner}::{ident}`: unknown `#[fields(..)]` key; expected `nested`, `skip` or `indexed`"
+                )));
+            };
+            if *flag {
+                return Err(
+                    meta.error(format!("`{owner}::{ident}`: duplicate `#[fields(..)]` key"))
+                );
+            }
+            *flag = true;
+            Ok(())
+        })?;
+        if !seen {
+            return Err(Error::new_spanned(
+                attr,
+                format!(
+                    "`{owner}::{ident}`: empty `#[fields()]`; expected `nested`, `skip` or `indexed`"
+                ),
+            ));
+        }
+    }
+    if skip {
+        if nested || indexed {
+            return Err(Error::new_spanned(
+                field,
+                format!("`{owner}::{ident}`: `skip` cannot be combined with other keys"),
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(Some(Keys { nested, indexed }))
+}
+
+/// Splits the type of an `indexed` field into its element type and length.
+fn indexed_parts<'a>(owner: &Ident, ident: &Ident, ty: &'a Type) -> Result<(&'a Type, &'a Expr)> {
+    let Type::Array(array) = ty else {
+        return Err(Error::new_spanned(
+            ty,
+            format!("`{owner}::{ident}`: `indexed` requires an array type `[T; N]`"),
+        ));
+    };
+    let elem = &*array.elem;
+    if matches!(elem, Type::Array(_)) {
+        return Err(Error::new_spanned(
+            elem,
+            format!("`{owner}::{ident}`: `indexed` supports one level of indexing"),
+        ));
+    }
+    Ok((elem, &array.len))
+}
+
+fn is_fields(attr: &Attribute) -> bool {
+    attr.path().is_ident("fields")
+}
+
+fn reject_fields_attrs(attrs: &[Attribute], ident: &Ident) -> Result<()> {
+    attrs
+        .iter()
+        .find(|attr| is_fields(attr))
+        .map_or(Ok(()), |attr| {
+            Err(Error::new_spanned(
+                attr,
+                format!("`{ident}`: `#[fields(..)]` attributes are not supported"),
+            ))
+        })
 }

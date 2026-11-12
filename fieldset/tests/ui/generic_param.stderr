@@ -1,0 +1,5 @@
+error: `X`: `Fields` cannot be derived for a generic struct
+ --> tests/ui/generic_param.rs:4:9
+  |
+4 | struct X<T: Copy> {
+  |         ^^^^^^^^^
